@@ -6,7 +6,6 @@ export const flareCoreVertexShader = `
 
   void main() {
     vUv = uv;
-    // Positioniert das Fontänen-Plane direkt an der jeweiligen Fackel-Position
     vec3 pos = position + uFlarePos + vec3(0.0, 0.38, 0.0);
     gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
   }
@@ -36,61 +35,74 @@ export const flareCoreFragmentShader = `
     );
   }
 
-  float jetNoise(vec2 p) {
-    float v = 0.55 * noise(p);
-    p = mat2(0.8, 0.6, -0.6, 0.8) * p * 2.1;
-    v += 0.30 * noise(p);
-    p = mat2(0.8, 0.6, -0.6, 0.8) * p * 2.1;
-    v += 0.15 * noise(p);
+  float fbm(vec2 p) {
+    float v = 0.50 * noise(p);
+    p = mat2(0.8, 0.6, -0.6, 0.8) * p * 2.05;
+    v += 0.28 * noise(p);
+    p = mat2(0.8, 0.6, -0.6, 0.8) * p * 2.15;
+    v += 0.14 * noise(p);
+    p = mat2(0.8, 0.6, -0.6, 0.8) * p * 2.25;
+    v += 0.08 * noise(p);
     return v;
   }
 
   void main() {
     float t = uTime + uTimeOffset;
 
-    float x = (vUv.x - 0.5) * 3.6;
-    float y = (vUv.y - 0.30) * 2.4;
+    float x = (vUv.x - 0.5) * 3.4;
+    float y = (vUv.y - 0.22) * 2.5;
 
     float flicker = 1.0
-      + sin(t * 62.0) * 0.15
-      + cos(t * 37.0) * 0.12
-      + sin(t * 97.0) * 0.08;
+      + sin(t * 58.0) * 0.10
+      + cos(t * 33.0) * 0.08
+      + sin(t * 91.0) * 0.05;
 
-    float windTilt = clamp(y, 0.0, 1.0);
-    x -= uWind.x * 0.11 * windTilt * windTilt;
+    // Sanfte Windbiegung nach oben
+    float windTilt = clamp(y, 0.0, 1.5);
+    x -= uWind.x * 0.08 * windTilt * windTilt;
 
-    vec2 flowUv = vec2(x * 4.5, y * 3.8 - t * 11.5);
-    float n1 = jetNoise(flowUv);
-    float n2 = jetNoise(flowUv * 2.2 + vec2(3.7, -t * 6.0));
-    float turb = (n1 * 0.6 + n2 * 0.4) - 0.5;
+    // 1. Scharfer, intensiver Point-Flare / Starburst am Ursprung
+    vec2 corePos = vec2(x, y);
+    float coreDist = length(corePos);
+    float hotPinpoint = exp(-coreDist * 14.0) * 2.6 * flicker;
 
-    float h = clamp(y, 0.0, 1.0);
-    float coneWidth = mix(0.05, 0.22, pow(h, 0.75)) * (0.88 + 0.12 * flicker);
+    // Anamorphotische Lichtstrahlen (Lens-Flare-Optik wie im Bild rechts unten)
+    float ray1 = exp(-abs(x * 1.8 + y * 0.6) * 16.0) * exp(-coreDist * 2.8);
+    float ray2 = exp(-abs(x * 0.5 - y * 1.6) * 16.0) * exp(-coreDist * 2.8);
+    float starRays = (ray1 + ray2) * 1.35 * flicker;
 
-    float flameWave = turb * (0.08 + 0.38 * pow(h, 0.8));
-    float radialDist = abs(x + flameWave) / max(coneWidth, 0.001);
+    // 2. Aufsteigende Energie-Filamente (Seidenfäden aus dem Kern)
+    float h = clamp(y, 0.0, 1.4);
+    vec2 streamUv = vec2(x * 3.2 + sin(h * 3.5 - t * 2.2) * 0.25, h * 2.2 - t * 3.8);
+    float warp = fbm(streamUv * 1.4);
+    float n1 = fbm(streamUv + vec2(warp * 0.85, -t * 1.5));
 
-    float dynamicHeight = 0.62 * flicker + turb * 0.38;
-    float nozzleCut = smoothstep(-0.03, 0.02, y);
-    float topRip = smoothstep(dynamicHeight + 0.18, dynamicHeight - 0.15, y);
-    float jetMask = nozzleCut * topRip;
+    // Ridge-Formel für scharfe, dünne Lichtlinien statt breiter Matsch-Flamme
+    float ridge1 = pow(clamp(1.0 - abs(n1 * 2.0 - 0.92), 0.0, 1.0), 5.0);
+    float ridge2 = pow(clamp(1.0 - abs(warp * 2.0 - 0.85), 0.0, 1.0), 4.0);
 
-    float edgeErosion = smoothstep(1.15, 0.35, radialDist + (0.5 - n1) * 0.55 * h);
-    float whiteCore = edgeErosion * jetMask * 1.55;
-    float innerRim = smoothstep(1.8, 0.4, radialDist) * jetMask * 0.95 * flicker;
+    float coneWidth = mix(0.06, 0.55, pow(clamp(h, 0.0, 1.0), 0.85));
+    float radialDist = abs(x + (warp - 0.5) * 0.45 * h) / max(coneWidth, 0.001);
 
-    vec2 glowPos = vec2(x * 0.7, (y - 0.28) * 0.9);
-    float outerAura = exp(-dot(glowPos, glowPos) * 4.2) * 0.42 * flicker;
+    float verticalMask = smoothstep(-0.08, 0.04, y) * smoothstep(1.35, 0.15, y);
+    float streamMask = exp(-radialDist * radialDist * 1.4) * verticalMask;
+
+    float filaments = (ridge1 * 1.4 + ridge2 * 0.9) * streamMask * flicker;
+    float innerJet = smoothstep(1.2, 0.15, radialDist) * smoothstep(0.65, 0.0, y) * verticalMask * 1.3;
+
+    // 3. Weiche tiefenvolumetrische Aura
+    vec2 glowPos = vec2(x * 0.75, (y - 0.15) * 0.85);
+    float outerAura = exp(-dot(glowPos, glowPos) * 4.5) * 0.48 * flicker;
 
     vec2 edgeVec = (vUv - 0.5) * 2.0;
-    float quadMask = smoothstep(1.0, 0.7, max(abs(edgeVec.x), abs(edgeVec.y)));
+    float quadMask = smoothstep(1.0, 0.68, max(abs(edgeVec.x), abs(edgeVec.y)));
 
-    vec3 coreColor = vec3(1.0, 0.96, 0.90) * whiteCore;
-    vec3 rimColor = mix(uAuraColor, vec3(1.0, 0.75, 0.35), 0.25) * innerRim;
+    vec3 whiteHot = vec3(1.0, 0.97, 0.95) * (hotPinpoint + innerJet + starRays * 0.7);
+    vec3 filamentColor = mix(uAuraColor * 1.8, vec3(1.0, 0.88, 0.98), 0.45) * (filaments + starRays * 0.5);
     vec3 auraColor = uAuraColor * outerAura;
 
-    vec3 finalColor = (coreColor + rimColor + auraColor) * quadMask;
-    float alpha = clamp((whiteCore + innerRim * 0.8 + outerAura) * quadMask, 0.0, 1.0);
+    vec3 finalColor = (whiteHot + filamentColor + auraColor) * quadMask;
+    float alpha = clamp((hotPinpoint + innerJet + filaments * 0.9 + outerAura + starRays) * quadMask, 0.0, 1.0);
 
     gl_FragColor = vec4(finalColor, alpha);
   }
@@ -105,7 +117,6 @@ export const smokeVertexShader = `
   uniform float uInteractionRadius;
   uniform vec3 uWind;
 
-  // NEU: Individuelle Rauch-Parameter pro Fackel
   uniform float uSmokeLifetime;
   uniform float uSmokeDensity;
   uniform float uSmokeSpread;
@@ -118,6 +129,7 @@ export const smokeVertexShader = `
   varying float vHeatFactor;
   varying float vAlphaMultiplier;
   varying float vLife;
+  varying float vFlowAngle;
 
   vec3 hash33(vec3 p) {
     p = fract(p * vec3(0.1031, 0.1030, 0.0973));
@@ -128,31 +140,27 @@ export const smokeVertexShader = `
   vec3 getSmokeLocalPos(float l, float t) {
     vec3 rnd = hash33(aSeed * 17.31);
 
-    float spawnHeight = 0.02 + rnd.y * 0.35;
-
-    // Skaliert den zurückgelegten Weg mit uSmokeLifetime, damit länger lebender Rauch
-    // bei gleicher Geschwindigkeit weiter über den Bildschirm zieht (statt in Zeitlupe zu fliegen)
+    float spawnHeight = 0.02 + rnd.y * 0.30;
     float distanceScale = uSmokeLifetime;
-    float windInfluence = pow(l, 1.15) * distanceScale;
+    float windInfluence = pow(l, 1.18) * distanceScale;
 
-    // uSmokeSpread steuert den Öffnungswinkel beim Aufsteigen, während die Basis (0.32) an der Fackel bleibt
-    float radialEnvelope = 0.32 + (smoothstep(0.0, 0.65, l) * 0.75 + pow(l, 1.4) * 0.35) * uSmokeSpread * sqrt(distanceScale);
+    // Organische S-Kurven-Strömung wie im Konzeptbild
+    float radialEnvelope = 0.24 + (smoothstep(0.0, 0.7, l) * 0.68 + pow(l, 1.45) * 0.35) * uSmokeSpread * sqrt(distanceScale);
 
-    float baseAngle = rnd.x * 6.2831853 + l * (1.2 + rnd.z * 1.6) * (rnd.y > 0.5 ? 1.0 : -1.0);
+    float baseAngle = rnd.x * 6.2831853 + l * (1.35 + rnd.z * 1.5) * (rnd.y > 0.5 ? 1.0 : -1.0);
     float radius = sqrt(rnd.z) * radialEnvelope;
 
-    float swirlPhase = l * 3.8 - t * 0.55 + rnd.y * 6.2831853;
+    float swirlPhase = l * 4.2 - t * 0.65 + rnd.y * 6.2831853;
     vec3 turbulence = vec3(
-      sin(swirlPhase) * 0.28 + cos(swirlPhase * 1.7 + rnd.x * 5.0) * 0.14,
-      sin(swirlPhase * 1.3 + rnd.z * 4.0) * 0.18,
+      sin(swirlPhase) * 0.32 + cos(swirlPhase * 1.8 + rnd.x * 5.0) * 0.16,
+      sin(swirlPhase * 1.4 + rnd.z * 4.0) * 0.22,
       cos(swirlPhase * 0.9 + rnd.x * 6.0) * 0.28
-    ) * smoothstep(0.0, 0.4, l) * mix(1.0, uSmokeSpread, 0.6);
+    ) * smoothstep(0.0, 0.35, l) * mix(1.0, uSmokeSpread, 0.6);
 
-    // Auch die vertikale Streuung fächert mit uSmokeSpread über die Lebenszeit weiter auf
-    float verticalSpread = (rnd.y - 0.5) * 0.45 * mix(1.0, uSmokeSpread, l);
+    float verticalSpread = (rnd.y - 0.5) * 0.42 * mix(1.0, uSmokeSpread, l);
 
-    float xPos = cos(baseAngle) * radius * 0.85 + uWind.x * windInfluence * (0.75 + rnd.z * 0.35) + turbulence.x;
-    float yPos = spawnHeight + pow(l, 0.92) * 3.35 * distanceScale + uWind.y * windInfluence + verticalSpread + turbulence.y;
+    float xPos = cos(baseAngle) * radius * 0.85 + uWind.x * windInfluence * (0.72 + rnd.z * 0.38) + turbulence.x;
+    float yPos = spawnHeight + pow(l, 0.90) * 3.45 * distanceScale + uWind.y * windInfluence + verticalSpread + turbulence.y;
     float zPos = sin(baseAngle) * radius * 0.85 + uWind.z * windInfluence + turbulence.z;
 
     return vec3(xPos, yPos, zPos);
@@ -163,7 +171,6 @@ export const smokeVertexShader = `
     vSeed = aSeed.yz;
 
     float t = uTime + uTimeOffset;
-    // Zyklus-Geschwindigkeit wird durch uSmokeLifetime geteilt -> Partikel lebt länger
     float speed = (0.020 + aSeed.z * 0.015) / max(uSmokeLifetime, 0.1);
 
     float totalLifeNow = aSeed.x + t * speed;
@@ -171,10 +178,14 @@ export const smokeVertexShader = `
     float life = fract(totalLifeNow);
     vLife = life;
 
-    // 1. Reguläre Grundposition berechnen
-    vec3 offset = uFlarePos + getSmokeLocalPos(life, t);
+    vec3 localNow = getSmokeLocalPos(life, t);
+    vec3 localNext = getSmokeLocalPos(min(life + 0.04, 1.0), t);
+    vec2 flowDir = normalize(localNext.xy - localNow.xy + vec2(0.0001));
+    vFlowAngle = atan(flowDir.y, flowDir.x);
 
-    // 2. DAUERHAFTE Klick-Verdrängung
+    vec3 offset = uFlarePos + localNow;
+
+    // Dauerhafte Klick-Verdrängung
     float permanentExpansion = 0.0;
     for (int i = 0; i < 4; i++) {
       float cTime = uClickTimes[i];
@@ -186,7 +197,6 @@ export const smokeVertexShader = `
 
         if (currentCycle == floor(totalLifeAtClick)) {
           float lifeAtClick = fract(totalLifeAtClick);
-
           vec3 posAtClick = uFlarePos + getSmokeLocalPos(lifeAtClick, tClick);
           vec3 fromClick = posAtClick - uClickPositions[i];
           float dist = length(fromClick);
@@ -205,7 +215,7 @@ export const smokeVertexShader = `
       }
     }
 
-    // 3. Maus-Interaktion
+    // Maus-Interaktion
     vec3 toMouse = offset - uMouse3D;
     float distSq = dot(toMouse, toMouse);
     float radiusSq = uInteractionRadius * uInteractionRadius;
@@ -217,13 +227,12 @@ export const smokeVertexShader = `
       offset = mix(offset, uMouse3D, pullFactor * 0.85);
     }
 
-    // Bei breiterer Streuung (uSmokeSpread) wachsen die Wolken-Puffs leicht mit, damit keine Lücken entstehen
-    float spreadScaleBoost = mix(1.0, uSmokeSpread, 0.25 * life);
-    float baseScale = mix(0.75, 1.75, smoothstep(0.0, 0.85, life)) * (0.85 + aSeed.y * 0.35) * spreadScaleBoost;
+    float spreadScaleBoost = mix(1.0, uSmokeSpread, 0.28 * life);
+    float baseScale = mix(0.70, 1.85, smoothstep(0.0, 0.85, life)) * (0.85 + aSeed.y * 0.35) * spreadScaleBoost;
     float scale = baseScale * mix(1.0, 0.55, pullFactor) * (1.0 + permanentExpansion * 0.6);
 
     float windRollDir = sign(uWind.x != 0.0 ? uWind.x : 1.0);
-    float angle = aSeed.y * 6.2831 - (life * 0.9 + pullFactor * 0.4 + permanentExpansion * 0.6) * windRollDir * (0.5 + aSeed.z * 0.5);
+    float angle = aSeed.y * 6.2831 - (life * 0.75 + pullFactor * 0.4 + permanentExpansion * 0.6) * windRollDir * (0.5 + aSeed.z * 0.5);
     float s = sin(angle);
     float c = cos(angle);
     vec2 rotatedPos = vec2(
@@ -231,13 +240,13 @@ export const smokeVertexShader = `
       position.x * s + position.y * c
     ) * scale;
 
-    float flickerBoost = 0.92 + 0.08 * sin(t * 42.0);
-    vHeatFactor = exp(-life * 2.4) * flickerBoost;
+    float flickerBoost = 0.94 + 0.06 * sin(t * 38.0);
+    // Wärme & Leuchtkraft reichen höher in den Rauch hinein (für den farbigen Glow im Bild)
+    vHeatFactor = exp(-life * 1.65) * flickerBoost;
 
-    // uSmokeDensity verstärkt die Basis-Deckkraft
-    float lifeFade = smoothstep(0.0, 0.12, life) * pow(1.0 - life, 1.25);
+    float lifeFade = smoothstep(0.0, 0.10, life) * pow(1.0 - life, 1.35);
     float dispersionFade = 1.0 / (1.0 + permanentExpansion * 0.55);
-    float densityOpacity = clamp(mix(0.52, 0.92, pullFactor) * uSmokeDensity, 0.0, 1.0) * dispersionFade;
+    float densityOpacity = clamp(mix(0.55, 0.95, pullFactor) * uSmokeDensity, 0.0, 1.0) * dispersionFade;
     vAlphaMultiplier = lifeFade * densityOpacity;
 
     vec4 mvPosition = modelViewMatrix * vec4(offset, 1.0);
@@ -251,19 +260,14 @@ export const smokeFragmentShader = `
   uniform float uTimeOffset;
   uniform vec3 uAuraColor;
   uniform vec3 uFogColor;
-  uniform float uSmokeDensity; // NEU: Steuert auch die innere Dunst-Sättigung
+  uniform float uSmokeDensity;
 
   varying vec2 vUv;
   varying vec2 vSeed;
   varying float vHeatFactor;
   varying float vAlphaMultiplier;
   varying float vLife;
-
-  vec2 hash22(vec2 p) {
-    vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.xx + p3.yz) * p3.zy);
-  }
+  varying float vFlowAngle;
 
   float hash12(vec2 p) {
     vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -282,26 +286,14 @@ export const smokeFragmentShader = `
     );
   }
 
-  float microParticleField(vec2 uv, float gridScale, float t, vec2 seedOffset) {
-    vec2 p = fract(uv) * gridScale + seedOffset;
-    vec2 cellId = floor(p);
-    vec2 localUv = fract(p) - 0.5;
-
-    vec2 rnd = hash22(cellId);
-
-    float phase = rnd.x * 6.2831853 + t * (1.4 + rnd.y * 1.6);
-    vec2 particleCenter = (rnd - 0.5) * 0.48 + vec2(cos(phase), sin(phase)) * 0.11;
-
-    vec2 diff = localUv - particleCenter;
-    float distSq = dot(diff, diff);
-
-    float radiusSq = mix(0.000018, 0.000075, rnd.y * rnd.y);
-    float dotMask = exp(-distSq / radiusSq);
-
-    float twinkle = 0.60 + 0.40 * sin(t * 3.8 + rnd.x * 50.0);
-    float presence = smoothstep(0.18, 0.75, fract(rnd.x * 13.7));
-
-    return dotMask * twinkle * presence;
+  // 3-Oktaven FBM für gestochen scharfe, hochaufgelöste Rauch-Texturierung
+  float fbm3(vec2 p) {
+    float v = 0.52 * softNoise(p);
+    p = mat2(0.8, -0.6, 0.6, 0.8) * p * 2.08;
+    v += 0.31 * softNoise(p);
+    p = mat2(0.8, 0.6, -0.6, 0.8) * p * 2.15;
+    v += 0.17 * softNoise(p);
+    return v;
   }
 
   void main() {
@@ -310,39 +302,58 @@ export const smokeFragmentShader = `
     if (distSq > 1.0) discard;
 
     float t = uTime + uTimeOffset;
-
     float oneMinusDistSq = 1.0 - distSq;
     float radialEnvelope = oneMinusDistSq * oneMinusDistSq;
 
-    // uSmokeDensity macht den weichen Volumen-Dunst im Kern satter
-    vec2 mistUv = vUv * 2.2 + vSeed * 11.0 + vec2(0.0, -t * 0.12);
-    float mistNoise = softNoise(mistUv);
-    float softMist = radialEnvelope * smoothstep(0.15, 0.85, mistNoise) * 0.42 * uSmokeDensity;
+    // 1. Domain-Warping: Verzerrt die Koordinaten organisch für echte HD-Rauchwirbel
+    vec2 baseUv = vUv * 2.8 + vSeed * 13.7;
+    vec2 warp = vec2(
+      softNoise(baseUv + vec2(0.0, -t * 0.22)),
+      softNoise(baseUv + vec2(5.2, -t * 0.18))
+    ) - 0.5;
 
-    vec2 drift1 = vec2(t * 0.00002, -t * 0.00005);
-    vec2 drift2 = vec2(-t * 0.00003, -t * 0.00007);
+    vec2 warpedUv = baseUv + warp * 0.85 + vec2(0.0, -t * 0.16);
+    float smokeFbm = fbm3(warpedUv);
 
-    float fineParticles = microParticleField(vUv + drift1, 50000.0, t, vSeed * 23.0);
-    float microDust = microParticleField(vUv + drift2, 70000.0, t * 1.2, vSeed * 41.0 + 7.3);
+    // 2. Scharfe Billow-Kanten (Wolkendefinition wie auf dem HD-Bild)
+    float billow = smoothstep(0.22, 0.78, smokeFbm);
+    float crispEdge = pow(1.0 - abs(smokeFbm * 2.0 - 1.0), 2.4);
 
-    float particleMask = (fineParticles * 0.85 + microDust * 0.65) * smoothstep(0.0, 0.35, oneMinusDistSq);
+    // 3. Seidenartige Strömungslinien / Energie-Filamente entlang der Flussrichtung
+    float ca = cos(vFlowAngle);
+    float sa = sin(vFlowAngle);
+    vec2 streamCoord = mat2(ca, -sa, sa, ca) * centered;
+    // Langgezogene Frequenz quer zur Strömung erzeugt die feinen Lichtfäden
+    vec2 silkUv = vec2(streamCoord.x * 1.8 - t * 0.45, streamCoord.y * 9.5 + warp.x * 2.2) + vSeed * 7.3;
+    float silkNoise = softNoise(silkUv);
+    float silkStrand = pow(clamp(1.0 - abs(silkNoise * 2.0 - 1.0), 0.0, 1.0), 5.5);
+    float silkMask = silkStrand * smoothstep(0.0, 0.55, oneMinusDistSq) * (0.35 + 0.65 * vHeatFactor);
 
-    vec3 ambientSmoke = mix(vec3(0.06, 0.08, 0.14), uFogColor * 0.65, mistNoise);
-    vec3 glowingAura = mix(uAuraColor, vec3(0.92, 0.96, 1.0), 0.35);
+    // 4. Volumetrisches Shading (Tiefe durch dunklen Rauchkern & leuchtende Kanten)
+    float luminance = dot(uAuraColor, vec3(0.299, 0.587, 0.114));
+    bool isDarkSmoke = luminance < 0.05; // Erkennt deine schwarze Kontrast-Fackel (0x000000)
 
-    float particleGlow = clamp(vHeatFactor * 0.75 + 0.35, 0.0, 1.0);
-    vec3 mistColor = mix(ambientSmoke, uAuraColor * 1.15, clamp(vHeatFactor * 0.85, 0.0, 1.0));
-    vec3 sparkColor = mix(uFogColor * 1.5 + vec3(0.25), glowingAura * 1.6, particleGlow);
+    vec3 deepShadow = vec3(0.015, 0.02, 0.04);
+    vec3 litSmokeColor = uAuraColor * 1.35 + vec3(0.18, 0.08, 0.22) * vHeatFactor;
+    vec3 filamentHighlight = mix(uAuraColor * 1.9, vec3(1.0, 0.90, 0.96), 0.50);
 
-    float combinedDensity = clamp(softMist + particleMask * 1.15, 0.0, 1.0);
-    float particleWeight = clamp(particleMask / max(combinedDensity, 0.001), 0.0, 1.0);
-    vec3 finalColor = mix(mistColor, sparkColor, particleWeight * 0.85);
+    vec3 finalColor;
+    if (isDarkSmoke) {
+      // Schwarzer Rauch bleibt tiefdunkel für maximalen HD-Kontrast
+      finalColor = mix(deepShadow, uFogColor * 0.18, crispEdge * 0.4);
+    } else {
+      // Farbiger Rauch: Schattierte Tiefe + leuchtende Rauchkanten + helle Seidenfäden
+      vec3 bodyColor = mix(deepShadow, litSmokeColor, clamp(billow * 0.75 + vHeatFactor * 0.55, 0.0, 1.0));
+      bodyColor += uAuraColor * crispEdge * (0.35 + vHeatFactor * 0.65);
+      finalColor = mix(bodyColor, filamentHighlight, clamp(silkMask * 1.35, 0.0, 1.0));
+    }
 
-    float alpha = clamp(combinedDensity * vAlphaMultiplier, 0.0, 1.0);
+    float densityShape = (billow * 0.48 + crispEdge * 0.24 + silkMask * 0.55) * radialEnvelope * uSmokeDensity;
+    float alpha = clamp(densityShape * vAlphaMultiplier, 0.0, 1.0);
+
     gl_FragColor = vec4(finalColor, alpha);
   }
 `;
-
 
 export const sparksVertexShader = `
   attribute vec4 aSparkSeed;
@@ -358,55 +369,70 @@ export const sparksVertexShader = `
   varying float vFade;
 
   void main() {
-    float t = uTime + uTimeOffset;
-    float speed = 0.48 + aSparkSeed.z * 0.55;
-    float cycle = fract(aSparkSeed.x + t * speed);
-    float activeWindow = 0.16 + aSparkSeed.w * 0.12;
-
-    if (cycle >= activeWindow) {
+    // Für die rein schwarze Kontrast-Fackel keine leuchtenden Funken erzeugen
+    if (dot(uAuraColor, uAuraColor) < 0.01) {
       gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
       gl_PointSize = 0.0;
       vFade = 0.0;
       return;
     }
 
-    float life = cycle / activeWindow;
-    bool isSlagDrop = aSparkSeed.y < 0.15;
+    float t = uTime + uTimeOffset;
 
-    vec3 startPos;
-    vec3 velocity;
-    float gravity;
+    // 2 Partikel-Typen wie im HD-Bild:
+    // 15% schnelle Fackel-Funken direkt an der Quelle, 85% aufsteigende Glühpartikel im Rauchstrom
+    bool isRisingEmber = aSparkSeed.y >= 0.15;
 
-    if (isSlagDrop) {
-      startPos = vec3((aSparkSeed.w - 0.5) * 0.05, -0.02, 0.0);
-      velocity = vec3((aSparkSeed.w - 0.5) * 0.45, -0.25, (aSparkSeed.z - 0.5) * 0.2);
-      gravity = 3.2;
-    } else {
-      float spawnY = 0.22 + aSparkSeed.w * 0.16;
-      float spreadAngle = (aSparkSeed.y - 0.575) * 3.1;
+    vec3 pos;
+    float life;
 
-      startPos = vec3(
-        sin(spreadAngle) * 0.06 + uWind.x * 0.04,
-        spawnY,
-        (aSparkSeed.z - 0.5) * 0.06
+    if (isRisingEmber) {
+      // Langsam aufsteigende, schwebende Glühpartikel (füllen den gesamten Rauch- und Strömungsraum)
+      float emberSpeed = 0.045 + aSparkSeed.z * 0.065;
+      life = fract(aSparkSeed.x + t * emberSpeed);
+
+      float climb = pow(life, 0.92) * 5.2;
+      float windDrift = pow(life, 1.18) * 1.45;
+
+      // Spiralförmige Strömungsbahn passend zum Rauch
+      float swirlAngle = aSparkSeed.w * 6.283185 + life * (3.5 + aSparkSeed.y * 2.5);
+      float spreadRadius = (0.12 + pow(life, 0.85) * 1.85) * sqrt(aSparkSeed.z);
+
+      pos = uFlarePos + vec3(
+        cos(swirlAngle) * spreadRadius + uWind.x * windDrift * (0.65 + aSparkSeed.y * 0.45),
+        0.10 + climb + sin(swirlAngle * 1.3) * 0.35,
+        sin(swirlAngle) * spreadRadius * 0.8 + uWind.z * windDrift
       );
+    } else {
+      // Klassische schnelle Auswurf-Funken direkt am Fackelkern
+      float speed = 0.45 + aSparkSeed.z * 0.50;
+      float cycle = fract(aSparkSeed.x + t * speed);
+      float activeWindow = 0.25 + aSparkSeed.w * 0.15;
 
-      float ejectPower = 1.6 + aSparkSeed.z * 1.9;
-      float sideBurst = sin(spreadAngle) * (0.9 + aSparkSeed.w * 1.4);
-      float upBurst = cos(spreadAngle * 0.55) * ejectPower;
+      if (cycle >= activeWindow) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        gl_PointSize = 0.0;
+        vFade = 0.0;
+        return;
+      }
 
-      velocity = vec3(
-        sideBurst + uWind.x * 0.32,
-        upBurst,
+      life = cycle / activeWindow;
+      float spreadAngle = (aSparkSeed.y / 0.15 - 0.5) * 2.8;
+      float ejectPower = 1.6 + aSparkSeed.z * 1.8;
+
+      vec3 startPos = vec3(sin(spreadAngle) * 0.06, 0.25 + aSparkSeed.w * 0.12, (aSparkSeed.z - 0.5) * 0.06);
+      vec3 velocity = vec3(
+        sin(spreadAngle) * (0.9 + aSparkSeed.w * 1.3) + uWind.x * 0.35,
+        cos(spreadAngle * 0.55) * ejectPower,
         (aSparkSeed.z - 0.5) * 0.8
       );
-      gravity = 3.8;
+
+      float drag = 1.0 - life * 0.35;
+      pos = uFlarePos + startPos + velocity * life * drag;
+      pos.y -= 0.5 * 3.4 * life * life;
     }
 
-    float drag = 1.0 - life * 0.35;
-    vec3 pos = uFlarePos + startPos + velocity * life * drag;
-    pos.y -= 0.5 * gravity * life * life;
-
+    // Maus-Interaktion
     vec3 toMouse = pos - uMouse3D;
     float distSq = dot(toMouse, toMouse);
     float radiusSq = uInteractionRadius * uInteractionRadius;
@@ -416,18 +442,24 @@ export const sparksVertexShader = `
       pos = mix(pos, uMouse3D, pullFactor * 0.88);
     }
 
-    vec3 hotWhite = vec3(3.6, 2.9, 2.0);
-    vec3 brightSparkColor = mix(vec3(2.2, 1.4, 0.6), uAuraColor * 2.5, 0.6);
-    vColor = mix(hotWhite, brightSparkColor, smoothstep(0.15, 0.75, life));
+    // HDR-Farben für intensives Leuchten im Bloom-Pass
+    vec3 hotWhite = vec3(3.2, 2.7, 2.3);
+    vec3 brightAura = uAuraColor * 2.8 + vec3(0.5, 0.2, 0.3);
+    vColor = mix(hotWhite, brightAura, smoothstep(0.05, 0.60, life));
 
-    float sputter = 0.75 + 0.25 * sin(t * 90.0 + aSparkSeed.w * 140.0);
-    vFade = (1.0 - pow(life, 2.2)) * sputter;
+    // Sanftes Funkeln (Twinkle)
+    float twinkle = 0.60 + 0.40 * sin(t * (14.0 + aSparkSeed.w * 20.0) + aSparkSeed.x * 90.0);
+    float fadeIn = smoothstep(0.0, 0.08, life);
+    float fadeOut = pow(1.0 - life, 1.5);
+    vFade = fadeIn * fadeOut * twinkle;
 
     vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
     gl_Position = projectionMatrix * mvPosition;
 
-    float baseSize = mix(42.0, 14.0, pow(life, 0.6)) * (0.75 + aSparkSeed.z * 0.5);
-    gl_PointSize = baseSize * (1.0 / -mvPosition.z);
+    // Bokeh-Größenvariation: Viele feine scharfe Punkte + einige größere leuchtende Orbs
+    float sizeDistribution = mix(9.0, 34.0, pow(aSparkSeed.w, 3.0));
+    float lifeScale = mix(1.0, 0.45, life);
+    gl_PointSize = sizeDistribution * lifeScale * (1.0 / -mvPosition.z);
   }
 `;
 
@@ -440,8 +472,12 @@ export const sparksFragmentShader = `
     float distSq = dot(centered, centered) * 4.0;
     if (distSq > 1.0) discard;
 
-    float core = exp(-distSq * 3.2);
-    gl_FragColor = vec4(vColor, core * vFade);
+    // Gestochen scharfer, heller Kern + weiche Korona
+    float sharpPinpoint = exp(-distSq * 10.0);
+    float softHalo = exp(-distSq * 2.4) * 0.45;
+    float mask = clamp(sharpPinpoint + softHalo, 0.0, 1.0);
+
+    gl_FragColor = vec4(vColor, mask * vFade);
   }
 `;
 
@@ -464,11 +500,9 @@ export const rainVertexShader = `
   void main() {
     vUv = uv;
 
-    // 1. Deutlich langsamere Fallgeschwindigkeit (ca. halb so schnell wie zuvor)
     float speed = 0.52 + aRainSeed.w * 0.32;
     float life = fract(aRainSeed.x + uTime * speed);
 
-    // 2. Senkrechterer Einfallswinkel (Windeinfluss von 1.15 auf 0.32 reduziert)
     float fallDistance = 9.5;
     vec3 drift = vec3(uWind.x * 0.32, -fallDistance, uWind.z * 0.32);
 
@@ -488,7 +522,6 @@ export const rainVertexShader = `
       pos = mix(pos, uMouse3D, pull * pull * 0.35);
     }
 
-    // --- Beleuchtung durch Fackel 1 (Links) ---
     vec3 toFlare1 = pos - (uFlarePos1 + vec3(0.0, 0.25, 0.0));
     float distSq1 = dot(toFlare1, toFlare1);
     float core1 = exp(-distSq1 * 0.85);
@@ -496,7 +529,6 @@ export const rainVertexShader = `
     float light1 = clamp(core1 + scatter1 * 0.45, 0.0, 1.0);
     vec3 glow1 = mix(uAuraColor1 * 1.65, vec3(2.2, 1.2, 1.2), core1 * 0.6) * light1;
 
-    // --- Beleuchtung durch Fackel 2 (Rechts) ---
     vec3 toFlare2 = pos - (uFlarePos2 + vec3(0.0, 0.25, 0.0));
     float distSq2 = dot(toFlare2, toFlare2);
     float core2 = exp(-distSq2 * 0.85);
@@ -512,7 +544,6 @@ export const rainVertexShader = `
     float depthFade = smoothstep(-4.0, 2.5, pos.z) * 0.5 + 0.5;
     vAlpha = mix(0.16, 0.85, totalLight) * edgeFade * depthFade;
 
-    // 3. Tropfen-Proportionen: Etwas kürzer und leicht breiter für eine dezente Tropfenform
     vec2 upDir = normalize(vec2(-drift.x, -drift.y));
     vec2 rightDir = vec2(upDir.y, -upDir.x);
 
@@ -532,9 +563,6 @@ export const rainFragmentShader = `
   varying float vAlpha;
 
   void main() {
-    // Subtile Droplet-Kontur:
-    // Unten (vUv.y ~ 0.22) besitzt der Tropfen einen leicht rundlichen Bauch
-    // und läuft nach oben (vUv.y -> 1.0) schmal in einen kurzen Schweif aus.
     float headCurve = smoothstep(0.0, 0.22, vUv.y);
     float tailTaper = pow(clamp(1.0 - vUv.y, 0.0, 1.0), 0.72);
     float dropEnvelope = mix(0.25, 1.0, headCurve) * tailTaper;
@@ -545,8 +573,6 @@ export const rainFragmentShader = `
 
     float horizontalSoftness = smoothstep(1.0, 0.12, normalizedX);
     float verticalStreak = smoothstep(0.0, 0.14, vUv.y) * pow(1.0 - vUv.y, 1.15);
-
-    // Leichte optische Verdichtung unten im Tropfenkopf
     float dropletHead = exp(-pow((vUv.y - 0.20) * 5.2, 2.0)) * 0.45;
 
     float alpha = horizontalSoftness * clamp(verticalStreak + dropletHead, 0.0, 1.0) * vAlpha;
@@ -571,10 +597,8 @@ export const clickDustVertexShader = `
 
   void main() {
     float elapsed = uTime - uClickTime;
-    // Individuelle Lebensdauer pro Staubkorn zwischen 1.1 und 2.2 Sekunden
     float duration = 1.1 + aDustSeed.w * 1.1;
 
-    // Außerhalb der Klick-Animation komplett abschalten (0 GPU-Kosten im Fragment-Shader)
     if (elapsed <= 0.0 || elapsed >= duration) {
       gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
       gl_PointSize = 0.0;
@@ -583,13 +607,9 @@ export const clickDustVertexShader = `
     }
 
     float life = elapsed / duration;
-
-    // 360°-Ausbreitung + unterschiedliche Ausstoßweiten (wie im Google-Video)
     float angle = aDustSeed.x * 6.2831853;
     float elevation = (aDustSeed.y - 0.5) * 2.4;
     float spreadRadius = 0.25 + pow(aDustSeed.z, 0.85) * 1.85;
-
-    // Starkes Abbremsen durch Luftwiderstand: Schneller Explosions-Start, dann sanftes Schweben
     float burstProgress = 1.0 - exp(-elapsed * 3.8);
 
     vec3 dir = vec3(
@@ -598,7 +618,6 @@ export const clickDustVertexShader = `
       sin(elevation) * 0.4
     );
 
-    // Leichte organische Verwirbelung + sanfter Zug in Windrichtung während des Schwebens
     vec3 turbulence = vec3(
       sin(elapsed * 2.8 + aDustSeed.y * 12.0),
       cos(elapsed * 2.3 + aDustSeed.x * 12.0),
@@ -608,17 +627,14 @@ export const clickDustVertexShader = `
     vec3 windDrift = uWind * 0.16 * elapsed * elapsed;
     vec3 pos = uClickPos + dir * spreadRadius * burstProgress + turbulence + windDrift;
 
-    // --- Dynamische Färbung: Nimmt nahe den Fackeln deren glühendes Licht an ---
     float d1 = dot(pos - uFlarePos1, pos - uFlarePos1);
     float d2 = dot(pos - uFlarePos2, pos - uFlarePos2);
     float glow1 = exp(-d1 * 0.45);
     float glow2 = exp(-d2 * 0.45);
 
-    // Kühle, silbrig-blaue Staubfarbe im Hintergrund (wie im Video) vs. Fackel-Farbe am Kern
     vec3 baseDustColor = mix(uFogColor * 1.7, vec3(0.88, 0.94, 1.0), 0.65);
     vColor = baseDustColor + uAuraColor1 * glow1 * 1.9 + uAuraColor2 * glow2 * 1.9;
 
-    // Feines Glitzern (Twinkle) der einzelnen Staubkörner
     float twinkle = 0.55 + 0.45 * sin(elapsed * 22.0 + aDustSeed.w * 80.0);
     float fadeIn = smoothstep(0.0, 0.06, life);
     float fadeOut = pow(1.0 - life, 1.6);
@@ -627,7 +643,6 @@ export const clickDustVertexShader = `
     vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
     gl_Position = projectionMatrix * mvPosition;
 
-    // Feine, gestochen scharfe Partikelgrößen (mit ein paar etwas größeren Körnern)
     float baseSize = mix(24.0, 5.0, pow(life, 0.55)) * (0.45 + pow(aDustSeed.z, 1.8) * 1.1);
     gl_PointSize = baseSize * (1.0 / -mvPosition.z);
   }
@@ -642,7 +657,6 @@ export const clickDustFragmentShader = `
     float distSq = dot(centered, centered) * 4.0;
     if (distSq > 1.0) discard;
 
-    // Scharfer kleiner Kern mit weichem Rand
     float particleMask = exp(-distSq * 3.8);
     gl_FragColor = vec4(vColor, particleMask * vAlpha);
   }

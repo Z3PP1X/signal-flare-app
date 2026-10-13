@@ -162,10 +162,11 @@ export class SignalFlareComponent {
     position: new THREE.Vector3(-4.5, -1.65, 0.0),
     color: new THREE.Color(0xff1e38),
     timeOffset: 4.0,
-    smokeCount: 120,      // Mehr Instanzen, damit der längere/breitere Pfad voll bleibt
-    smokeLifetime: 1.25,  // Lebt 45 % länger und zieht weiter nach rechts oben
-    smokeDensity: 1.4,    // 40 % dichterer Farbrauch
-    smokeSpread: 1.55     // 55 % breiterer Ausstoßwinkel
+    smokeCount: 95,       // 95 reichen durch das neue FBM völlig aus (spart Overdraw!)
+    smokeLifetime: 1.25,
+    smokeDensity: 1.35,
+    smokeSpread: 1.45,
+    sparkCount: 320       // NEU: Hunderte feine Glühpartikel im linken roten Strom!
   };
 
   // Schwarze Fackel: noch etwas dichter und breiter für starken Kontrast zum Rot
@@ -180,9 +181,14 @@ export class SignalFlareComponent {
   };
 
   private readonly flare2Config: FlareConfig = {
-    position: new THREE.Vector3(3.2, -0.15, -0.35), // Rechts versetzt & leicht im Hintergrund
-    color: new THREE.Color(0x7623b3),                // Zweite Fackelfarbe (z. B. Eisblau / Cyan)
-    timeOffset: 37.5                                 // Phasenversatz gegen synchrones Flackern
+    position: new THREE.Vector3(3.2, -0.85, -0.35), // Etwas tiefer wie im Konzeptbild
+    color: new THREE.Color(0x9b26ff),               // Kräftigeres, leuchtendes Violett
+    timeOffset: 37.5,
+    smokeCount: 85,
+    smokeLifetime: 1.15,
+    smokeDensity: 1.25,
+    smokeSpread: 1.15,
+    sparkCount: 280       // NEU: Aufsteigender violetter Funkenregen rechts!
   };
 
   private readonly flare3Config: FlareConfig = {
@@ -258,12 +264,6 @@ export class SignalFlareComponent {
         this.animate();
       });
 
-      this.ngZone.runOutsideAngular(() => {
-        window.addEventListener('pointermove', this.onPointerMove, { passive: true });
-        window.addEventListener('resize', this.onWindowResize, { passive: true });
-        this.animate();
-      });
-
       this.destroyRef.onDestroy(() => {
         if (this.animationFrameId !== null) {
           cancelAnimationFrame(this.animationFrameId);
@@ -313,9 +313,9 @@ export class SignalFlareComponent {
     const renderPass = new RenderPass(this.scene, this.camera);
     this.bloomPass = new UnrealBloomPass(
       new THREE.Vector2(width * 0.5, height * 0.5),
-      0.85,
-      0.5,
-      0.25
+      0.65,
+      0.42,
+      0.52
     );
 
     this.composer = new EffectComposer(this.renderer);
@@ -345,7 +345,7 @@ export class SignalFlareComponent {
   }
 
   private createFlareCore(flareUniforms: Record<string, THREE.IUniform>): void {
-    const geometry = new THREE.PlaneGeometry(1.5, 1.9);
+    const geometry = new THREE.PlaneGeometry(2.2, 2.8);
     const material = new THREE.ShaderMaterial({
       vertexShader: flareCoreVertexShader,
       fragmentShader: flareCoreFragmentShader,
