@@ -12,6 +12,8 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import {
+  flowmapVertexShader,
+  flowmapFragmentShader,
   flareCoreVertexShader,
   flareCoreFragmentShader,
   smokeVertexShader,
@@ -28,10 +30,10 @@ interface FlareConfig {
   position: THREE.Vector3;
   color: THREE.Color;
   timeOffset: number;
-  smokeCount?: number;    // Menge (Anzahl der Instanzen, Standard: 95)
-  smokeLifetime?: number; // Lebenszeit & Reichweite (Standard: 1.0)
-  smokeDensity?: number;  // Dichte / Deckkraft (Standard: 1.0)
-  smokeSpread?: number;   // Öffnungswinkel / Auffächerung (Standard: 1.0)
+  smokeCount?: number;
+  smokeLifetime?: number;
+  smokeDensity?: number;
+  smokeSpread?: number;
   sparkCount?: number;
 }
 
@@ -67,7 +69,6 @@ interface FlareConfig {
       z-index: 1;
     }
 
-    /* Liegt über dem Canvas, lässt aber Klicks und Mausbewegungen für den Shader durch */
     .hero-overlay {
       position: absolute;
       inset: 0;
@@ -75,7 +76,7 @@ interface FlareConfig {
       display: flex;
       align-items: center;
       justify-content: center;
-      pointer-events: none; /* WICHTIG: Klicks gehen durch auf das Canvas dahinter */
+      pointer-events: none;
       padding: 2rem;
       user-select: none;
     }
@@ -111,7 +112,6 @@ interface FlareConfig {
       text-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
     }
 
-    /* Buttons müssen wieder explizit klickbar sein */
     .hero-btn {
       pointer-events: auto;
       margin-top: 0.5rem;
@@ -143,10 +143,9 @@ export class SignalFlareComponent {
 
   private readonly ngZone = inject(NgZone);
   private readonly destroyRef = inject(DestroyRef);
-  private clickRingIndex = 0;
+
   protected onButtonClick(): void {
     console.log('Learn more geklickt!');
-    // Hier deine Aktion oder Navigation einfügen
   }
 
   private scene!: THREE.Scene;
@@ -157,60 +156,61 @@ export class SignalFlareComponent {
   private readonly clock = new THREE.Clock();
   private animationFrameId: number | null = null;
 
-  // Definition beider Fackeln (Position & Farbe)
+  // --- NEU (ETAPPE 2): Ping-Pong Flowmap FBO Variablen ---
+  private flowmapTargetA!: THREE.WebGLRenderTarget;
+  private flowmapTargetB!: THREE.WebGLRenderTarget;
+  private flowmapScene!: THREE.Scene;
+  private flowmapCamera!: THREE.OrthographicCamera;
+  private flowmapMaterial!: THREE.ShaderMaterial;
+
+  private readonly mouseUv = new THREE.Vector2(0.5, 0.5);
+  private readonly prevMouseUv = new THREE.Vector2(0.5, 0.5);
+  private readonly mouseVelocity = new THREE.Vector2(0, 0);
+  private pointerInitialized = false;
+
+  private readonly flowmapUniforms = {
+    uPrevFlowMap: { value: null as THREE.Texture | null },
+    uMouseUv: { value: new THREE.Vector2(0.5, 0.5) },
+    uMouseVelocity: { value: new THREE.Vector2(0, 0) },
+    uAspect: { value: 1.0 },
+    uBrushRadius: { value: 0.11 }, // Größe des Maus-Strömungsfeldes
+    uDissipation: { value: 0.966 }, // Wie lange die Strömung nachwirkt (0.966 ~ 1.5 Sek.)
+    uClickUv: { value: new THREE.Vector2(0.5, 0.5) },
+    uClickImpulse: { value: 0.0 }
+  };
+
+  // Definition der Fackeln
   private readonly flare1Config: FlareConfig = {
     position: new THREE.Vector3(-4.5, -1.65, 0.0),
     color: new THREE.Color(0xff1e38),
     timeOffset: 4.0,
-    smokeCount: 95,       // 95 reichen durch das neue FBM völlig aus (spart Overdraw!)
+    smokeCount: 95,
     smokeLifetime: 1.25,
     smokeDensity: 1.35,
-    smokeSpread: 1.45,
-    sparkCount: 320       // NEU: Hunderte feine Glühpartikel im linken roten Strom!
+    smokeSpread: 1.55
   };
 
-  // Schwarze Fackel: noch etwas dichter und breiter für starken Kontrast zum Rot
   private readonly flareBlackConfig: FlareConfig = {
     position: new THREE.Vector3(-4.0, -1.65, 0.0),
     color: new THREE.Color(0x000000),
     timeOffset: 0.0,
-    smokeCount: 105,
+    smokeCount: 85,
     smokeLifetime: 1.1,
     smokeDensity: 1.2,
     smokeSpread: 1.2
   };
 
   private readonly flare2Config: FlareConfig = {
-    position: new THREE.Vector3(3.2, -0.85, -0.35), // Etwas tiefer wie im Konzeptbild
-    color: new THREE.Color(0x9b26ff),               // Kräftigeres, leuchtendes Violett
-    timeOffset: 37.5,
-    smokeCount: 85,
-    smokeLifetime: 1.15,
-    smokeDensity: 1.25,
-    smokeSpread: 1.15,
-    sparkCount: 280       // NEU: Aufsteigender violetter Funkenregen rechts!
+    position: new THREE.Vector3(3.2, -0.15, -0.35),
+    color: new THREE.Color(0x7623b3),
+    timeOffset: 37.5
   };
 
-  private readonly flare3Config: FlareConfig = {
-    position: new THREE.Vector3(2.85, 2.35, -0.65), // Rechts versetzt & leicht im Hintergrund
-    color: new THREE.Color(0x72a70),                // Zweite Fackelfarbe (z. B. Eisblau / Cyan)
-    timeOffset: 12.5                                 // Phasenversatz gegen synchrones Flackern
-  };
-
-  private readonly flareGreenConfig: FlareConfig = {
-    position: new THREE.Vector3(0.35, -0.95, -0.65), // Rechts versetzt & leicht im Hintergrund
-    color: new THREE.Color(0x6aaa2f),                // Zweite Fackelfarbe (z. B. Eisblau / Cyan)
-    timeOffset: 25.5                                 // Phasenversatz gegen synchrones Flackern
-  };
-
-  
-
-  // Globale Uniforms (werden per Referenz von allen Shadern geteilt)
+  // Globale Uniforms (inklusive uFlowMap für alle Shader)
   private readonly sharedUniforms = {
     uTime: { value: 0 },
     uFogColor: { value: new THREE.Color(0x3b4d66) },
-    uMouse3D: { value: new THREE.Vector3(999, 999, 999) },
-    uInteractionRadius: { value: 0.85 },
+    uFlowMap: { value: null as THREE.Texture | null },
     uWind: { value: new THREE.Vector3(2.2, 0.0, 0.3) },
     uFlarePos1: { value: this.flare1Config.position },
     uAuraColor1: { value: this.flare1Config.color },
@@ -218,45 +218,27 @@ export class SignalFlareComponent {
     uAuraColorBlack: { value: this.flareBlackConfig.color },
     uFlarePos2: { value: this.flare2Config.position },
     uAuraColor2: { value: this.flare2Config.color },
-    uFlarePos3: { value: this.flare3Config.position },
-    uAuraColor3: { value: this.flare3Config.color },
-    uFlarePosGreen: { value: this.flareGreenConfig.position },
-    uAuraColorGreen: { value: this.flareGreenConfig.color },
-    // NEU für den Klick-Effekt:
     uClickPos: { value: new THREE.Vector3(999, 999, 999) },
-    uClickTime: { value: -100 },
-
-    uClickPositions: {
-      value: [
-        new THREE.Vector3(999, 999, 999),
-        new THREE.Vector3(999, 999, 999),
-        new THREE.Vector3(999, 999, 999),
-        new THREE.Vector3(999, 999, 999)
-      ]
-    },
-    uClickTimes: { value: [-100, -100, -100, -100] }
+    uClickTime: { value: -100 }
   };
 
   private readonly raycaster = new THREE.Raycaster();
   private readonly pointer = new THREE.Vector2();
   private readonly interactionPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
-  private pointerDirty = false;
 
   constructor() {
     afterNextRender(() => {
       this.initScene();
+      this.initFlowmap();
 
-      // Beide Fackeln instanziieren
       this.createFlare(this.flare1Config);
       this.createFlare(this.flareBlackConfig);
       this.createFlare(this.flare2Config);
-      //this.createFlare(this.flare3Config);
-      //this.createFlare(this.flareGreenConfig)
 
-      // Globaler Regen
       this.createRain(0);
       this.createClickDust(180);
 
+      // ETAPPE 1 FIX: Nur noch EIN Render-Loop außerhalb von Angular!
       this.ngZone.runOutsideAngular(() => {
         window.addEventListener('pointermove', this.onPointerMove, { passive: true });
         window.addEventListener('pointerdown', this.onPointerDown, { passive: true });
@@ -269,6 +251,7 @@ export class SignalFlareComponent {
           cancelAnimationFrame(this.animationFrameId);
         }
         window.removeEventListener('pointermove', this.onPointerMove);
+        window.removeEventListener('pointerdown', this.onPointerDown);
         window.removeEventListener('resize', this.onWindowResize);
 
         this.scene?.traverse((obj) => {
@@ -282,6 +265,9 @@ export class SignalFlareComponent {
           }
         });
 
+        this.flowmapTargetA?.dispose();
+        this.flowmapTargetB?.dispose();
+        this.flowmapMaterial?.dispose();
         this.composer?.dispose();
         this.renderer?.dispose();
       });
@@ -311,11 +297,13 @@ export class SignalFlareComponent {
     this.renderer.setPixelRatio(pixelRatio);
 
     const renderPass = new RenderPass(this.scene, this.camera);
+
+    // ETAPPE 1 TUNING: Höherer Threshold (0.48) für knackige HD-Kontraste statt Matsch-Glow
     this.bloomPass = new UnrealBloomPass(
       new THREE.Vector2(width * 0.5, height * 0.5),
-      0.65,
-      0.42,
-      0.52
+      0.68, // Strength
+      0.45, // Radius
+      0.48  // Threshold
     );
 
     this.composer = new EffectComposer(this.renderer);
@@ -325,9 +313,73 @@ export class SignalFlareComponent {
   }
 
   /**
-   * Erzeugt eine komplette Fackel (Rauch, Flammen-Fontäne und Funken)
-   * mit eigenen Positions- und Farb-Uniforms, aber geteilten globalen Uniforms.
+   * ETAPPE 2: Initialisiert das 128x128 Ping-Pong RenderTarget für die Velocity Flowmap
    */
+  private initFlowmap(): void {
+    const fboOptions: THREE.RenderTargetOptions = {
+      type: THREE.HalfFloatType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      depthBuffer: false,
+      stencilBuffer: false
+    };
+
+    this.flowmapTargetA = new THREE.WebGLRenderTarget(128, 128, fboOptions);
+    this.flowmapTargetB = new THREE.WebGLRenderTarget(128, 128, fboOptions);
+
+    this.flowmapScene = new THREE.Scene();
+    this.flowmapCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+    this.flowmapUniforms.uAspect.value = window.innerWidth / window.innerHeight;
+
+    this.flowmapMaterial = new THREE.ShaderMaterial({
+      vertexShader: flowmapVertexShader,
+      fragmentShader: flowmapFragmentShader,
+      uniforms: this.flowmapUniforms,
+      depthTest: false,
+      depthWrite: false
+    });
+
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.flowmapMaterial);
+    this.flowmapScene.add(quad);
+
+    this.sharedUniforms.uFlowMap.value = this.flowmapTargetA.texture;
+  }
+
+  /**
+   * ETAPPE 2: Berechnet pro Frame das neue Strömungs-Grid im Ping-Pong-Verfahren
+   */
+  private updateFlowmap(): void {
+    // 1. Maus-Geschwindigkeit glätten
+    const deltaX = this.mouseUv.x - this.prevMouseUv.x;
+    const deltaY = this.mouseUv.y - this.prevMouseUv.y;
+    this.prevMouseUv.copy(this.mouseUv);
+
+    this.mouseVelocity.x = THREE.MathUtils.lerp(this.mouseVelocity.x, deltaX, 0.35);
+    this.mouseVelocity.y = THREE.MathUtils.lerp(this.mouseVelocity.y, deltaY, 0.35);
+
+    this.flowmapUniforms.uMouseUv.value.copy(this.mouseUv);
+    this.flowmapUniforms.uMouseVelocity.value.copy(this.mouseVelocity);
+    this.flowmapUniforms.uPrevFlowMap.value = this.flowmapTargetA.texture;
+
+    // 2. In Target B rendern
+    this.renderer.setRenderTarget(this.flowmapTargetB);
+    this.renderer.render(this.flowmapScene, this.flowmapCamera);
+    this.renderer.setRenderTarget(null);
+
+    // 3. Ping-Pong Swap (B wird zu A)
+    const temp = this.flowmapTargetA;
+    this.flowmapTargetA = this.flowmapTargetB;
+    this.flowmapTargetB = temp;
+
+    // 4. Aktuelle Textur an alle Partikel-/Rauch-Shader übergeben
+    this.sharedUniforms.uFlowMap.value = this.flowmapTargetA.texture;
+
+    // 5. Klick-Schockwelle sanft ausklingen lassen
+    this.flowmapUniforms.uClickImpulse.value *= 0.88;
+  }
+
   private createFlare(config: FlareConfig): void {
     const flareUniforms = {
       ...this.sharedUniforms,
@@ -345,7 +397,7 @@ export class SignalFlareComponent {
   }
 
   private createFlareCore(flareUniforms: Record<string, THREE.IUniform>): void {
-    const geometry = new THREE.PlaneGeometry(2.2, 2.8);
+    const geometry = new THREE.PlaneGeometry(1.5, 1.9);
     const material = new THREE.ShaderMaterial({
       vertexShader: flareCoreVertexShader,
       fragmentShader: flareCoreFragmentShader,
@@ -470,22 +522,16 @@ export class SignalFlareComponent {
     this.scene.add(rainMesh);
   }
 
-  private onPointerMove = (event: PointerEvent): void => {
-    this.pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
-    this.pointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
-    this.pointerDirty = true;
-  };
-
   private createClickDust(particleCount: number): void {
     const geometry = new THREE.BufferGeometry();
     const positions = new Float32Array(particleCount * 3);
     const seeds = new Float32Array(particleCount * 4);
 
     for (let i = 0; i < particleCount; i++) {
-      seeds[i * 4 + 0] = Math.random(); // Winkel (360°)
-      seeds[i * 4 + 1] = Math.random(); // Vertikale Streuung & Turbulenz
-      seeds[i * 4 + 2] = Math.random(); // Ausstoß-Radius & Korngröße
-      seeds[i * 4 + 3] = Math.random(); // Lebensdauer & Glitzer-Phase
+      seeds[i * 4 + 0] = Math.random();
+      seeds[i * 4 + 1] = Math.random();
+      seeds[i * 4 + 2] = Math.random();
+      seeds[i * 4 + 3] = Math.random();
     }
 
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -507,21 +553,33 @@ export class SignalFlareComponent {
     this.scene.add(dustPoints);
   }
 
+  private onPointerMove = (event: PointerEvent): void => {
+    const uvX = event.clientX / window.innerWidth;
+    const uvY = 1.0 - event.clientY / window.innerHeight;
+
+    if (!this.pointerInitialized) {
+      this.prevMouseUv.set(uvX, uvY);
+      this.pointerInitialized = true;
+    }
+
+    this.mouseUv.set(uvX, uvY);
+  };
+
   private onPointerDown = (event: PointerEvent): void => {
-    this.pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
-    this.pointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
+    const uvX = event.clientX / window.innerWidth;
+    const uvY = 1.0 - event.clientY / window.innerHeight;
+
+    // 1. Schockwelle in die Flowmap einspeisen
+    this.flowmapUniforms.uClickUv.value.set(uvX, uvY);
+    this.flowmapUniforms.uClickImpulse.value = 1.0;
+
+    // 2. 3D-Weltposition für die funkelnde Staub-Explosion berechnen
+    this.pointer.x = uvX * 2 - 1;
+    this.pointer.y = uvY * 2 - 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
+    this.raycaster.ray.intersectPlane(this.interactionPlane, this.sharedUniforms.uClickPos.value);
 
-    const hitPoint = this.sharedUniforms.uClickPos.value;
-    this.raycaster.ray.intersectPlane(this.interactionPlane, hitPoint);
-
-    const now = this.clock.getElapsedTime();
-    this.sharedUniforms.uClickTime.value = now;
-
-    // Im Ring-Buffer sichern, damit die Rauch-Verdrängung dauerhaft bestehen bleibt
-    this.sharedUniforms.uClickPositions.value[this.clickRingIndex].copy(hitPoint);
-    this.sharedUniforms.uClickTimes.value[this.clickRingIndex] = now;
-    this.clickRingIndex = (this.clickRingIndex + 1) % 4;
+    this.sharedUniforms.uClickTime.value = this.clock.getElapsedTime();
   };
 
   private onWindowResize = (): void => {
@@ -532,18 +590,16 @@ export class SignalFlareComponent {
     this.renderer.setSize(width, height);
     this.composer.setSize(width, height);
     this.bloomPass.resolution.set(width * 0.5, height * 0.5);
+    this.flowmapUniforms.uAspect.value = width / height;
   };
 
   private animate = (): void => {
     this.animationFrameId = requestAnimationFrame(this.animate);
 
-    if (this.pointerDirty) {
-      this.raycaster.setFromCamera(this.pointer, this.camera);
-      this.raycaster.ray.intersectPlane(this.interactionPlane, this.sharedUniforms.uMouse3D.value);
-      this.pointerDirty = false;
-    }
-
     this.sharedUniforms.uTime.value = this.clock.getElapsedTime();
+
+    // Zuerst das schnelle 128x128 Fluid-Grid aktualisieren, dann die Szene rendern
+    this.updateFlowmap();
     this.composer.render();
   };
 }
