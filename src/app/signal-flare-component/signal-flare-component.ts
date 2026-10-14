@@ -23,7 +23,9 @@ import {
   rainVertexShader,
   rainFragmentShader,
   clickDustVertexShader,
-  clickDustFragmentShader
+  clickDustFragmentShader,
+  silkRibbonVertexShader,    // <--- NEU (Etappe 3)
+  silkRibbonFragmentShader
 } from '../flare-shaders';
 
 interface FlareConfig {
@@ -181,28 +183,28 @@ export class SignalFlareComponent {
 
   // Definition der Fackeln
   private readonly flare1Config: FlareConfig = {
-    position: new THREE.Vector3(-4.5, -1.65, 0.0),
+    position: new THREE.Vector3(-3.85, -1.75, 0.0),
     color: new THREE.Color(0xff1e38),
     timeOffset: 4.0,
     smokeCount: 95,
     smokeLifetime: 1.25,
-    smokeDensity: 1.35,
-    smokeSpread: 1.55
+    smokeDensity: 1.55,
+    smokeSpread: 1.15
   };
 
   private readonly flareBlackConfig: FlareConfig = {
-    position: new THREE.Vector3(-4.0, -1.65, 0.0),
+    position: new THREE.Vector3(-3.85, -1.65, 0.05),
     color: new THREE.Color(0x000000),
     timeOffset: 0.0,
-    smokeCount: 85,
-    smokeLifetime: 1.1,
-    smokeDensity: 1.2,
+    smokeCount: 110,
+    smokeLifetime: 1.15,
+    smokeDensity: 1.25,
     smokeSpread: 1.2
   };
 
   private readonly flare2Config: FlareConfig = {
-    position: new THREE.Vector3(3.2, -0.15, -0.35),
-    color: new THREE.Color(0x7623b3),
+    position: new THREE.Vector3(3.1, -0.95, -0.35),
+    color: new THREE.Color(0x9b26ff),
     timeOffset: 37.5
   };
 
@@ -222,6 +224,51 @@ export class SignalFlareComponent {
     uClickTime: { value: -100 }
   };
 
+  /**
+   * ETAPPE 3: Erzeugt die geschwungenen Führungslinien & Seiden-Rauchschleier,
+   * die den linken roten Rauch mit dem rechten violetten Strom verbinden.
+   */
+  private createSilkRibbons(ribbonCount: number): void {
+    // 120 Segmente entlang der Kurve für butterweiche Biegungen
+    const baseGeometry = new THREE.PlaneGeometry(1, 1, 120, 1);
+    // PlaneGeometry standardmäßig von [-0.5..0.5] in X, wir nutzen uv.x [0..1] für die Bézier-Kurve
+    const instancedGeometry = new THREE.InstancedBufferGeometry();
+    instancedGeometry.index = baseGeometry.index;
+    instancedGeometry.attributes['position'] = baseGeometry.attributes['position'];
+    instancedGeometry.attributes['uv'] = baseGeometry.attributes['uv'];
+
+    const seeds = new Float32Array(ribbonCount * 4);
+    for (let i = 0; i < ribbonCount; i++) {
+      // Gleichmäßige Auffächerung mit leichter organischer Streuung
+      const normalizedIndex = i / Math.max(ribbonCount - 1, 1);
+      seeds[i * 4 + 0] = THREE.MathUtils.clamp(normalizedIndex + (Math.random() - 0.5) * 0.08, 0.0, 1.0);
+      seeds[i * 4 + 1] = Math.random(); // Phasen-Offset
+      seeds[i * 4 + 2] = Math.random(); // Breiten- & Geschwindigkeits-Variation
+      seeds[i * 4 + 3] = i < 8 ? 0.2 : 0.8; // 8 feine Fadenbrücken (Typ A) + 6 breite Schleier (Typ B)
+    }
+
+    instancedGeometry.setAttribute(
+      'aRibbonSeed',
+      new THREE.InstancedBufferAttribute(seeds, 4)
+    );
+
+    const ribbonMaterial = new THREE.ShaderMaterial({
+      vertexShader: silkRibbonVertexShader,
+      fragmentShader: silkRibbonFragmentShader,
+      uniforms: this.sharedUniforms,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide
+    });
+
+    const ribbonMesh = new THREE.Mesh(instancedGeometry, ribbonMaterial);
+    ribbonMesh.frustumCulled = false;
+    ribbonMesh.renderOrder = 1; // Liegt harmonisch eingebettet zwischen Rauch und Fackelkern
+    this.scene.add(ribbonMesh);
+  }
+
   private readonly raycaster = new THREE.Raycaster();
   private readonly pointer = new THREE.Vector2();
   private readonly interactionPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
@@ -232,8 +279,10 @@ export class SignalFlareComponent {
       this.initFlowmap();
 
       this.createFlare(this.flare1Config);
-      this.createFlare(this.flareBlackConfig);
+      // this.createFlare(this.flareBlackConfig);
       this.createFlare(this.flare2Config);
+
+      this.createSilkRibbons(14);
 
       this.createRain(0);
       this.createClickDust(180);
